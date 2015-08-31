@@ -2,8 +2,8 @@ package tunio
 
 import (
 	"bytes"
-	"code.google.com/p/tuntap"
 	"fmt"
+	"github.com/getlantern/tuntap"
 	"io"
 	"log"
 	"net"
@@ -19,8 +19,39 @@ const (
 	deviceMask = "192.168.87.2/24"
 )
 
+type tuntapReadWriter struct {
+	*tuntap.Interface
+}
+
+func (ttrw *tuntapReadWriter) Read(buf []byte) (n int, err error) {
+	packet, err := ttrw.Interface.ReadPacket()
+	if err != nil {
+		return 0, err
+	}
+	return len(packet.Packet), nil
+}
+
+func (ttrw *tuntapReadWriter) Write(buf []byte) (n int, err error) {
+	packet := tuntap.Packet{
+		Protocol: 0x8000,
+		Packet:   buf,
+	}
+	if err := ttrw.WritePacket(&packet); err != nil {
+		return 0, err
+	}
+	return len(packet.Packet), nil
+}
+
+func newTunTapRW(deviceName string, devKind tuntap.DevKind) (*tuntapReadWriter, error) {
+	iface, err := tuntap.Open(deviceName, devKind)
+	if err != nil {
+		return nil, err
+	}
+	return &tuntapReadWriter{iface}, nil
+}
+
 var (
-	iface *tuntap.Interface
+	iface *tuntapReadWriter
 	tunio *TunIO
 )
 
@@ -89,7 +120,7 @@ func (e *mockConn) SetWriteDeadline(t time.Time) error {
 func TestSetupTunDevice(t *testing.T) {
 	var err error
 
-	if err := exec.Command("sudo", "ip", "tuntap", "del", "tun87", "mode", "tun").Run(); err != nil {
+	if err = exec.Command("sudo", "ip", "tuntap", "del", "tun87", "mode", "tun").Run(); err != nil {
 		// t.Fatal(err)
 	}
 
@@ -105,20 +136,17 @@ func TestSetupTunDevice(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if iface, err = tuntap.Open(deviceName, tuntap.DevTun); err != nil {
+	if iface, err = newTunTapRW(deviceName, tuntap.DevTun); err != nil {
 		t.Fatal(err)
 	}
+
 	tunio = NewTunIO(&mockDialer{})
 	go runPacketCaptureLoop(iface, tunio)
 }
 
-func runPacketCaptureLoop(iface *tuntap.Interface, tunio *TunIO) {
+func runPacketCaptureLoop(iface *tuntapReadWriter, tunio *TunIO) {
 	for {
-		packet, err := iface.ReadPacket()
-		if err != nil {
-			log.Fatalf("ReadPacket: %q", err)
-		}
-		if err := tunio.HandlePacket(iface, packet); err != nil {
+		if err := tunio.HandlePacket(iface, iface); err != nil {
 			log.Fatalf("handlePacket: %q", err)
 		}
 	}
